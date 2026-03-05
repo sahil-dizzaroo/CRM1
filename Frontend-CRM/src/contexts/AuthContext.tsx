@@ -106,9 +106,12 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   }
 
   const signup = async (user_id: string, name: string, email: string, password: string, role: string = 'participant') => {
+    console.log('🔍 Signup attempt:', { user_id, name, email, role })
+    console.log('🔍 API URL:', import.meta.env.VITE_API_BASE)
+    
     try {
+      console.log('🔍 Making request to:', `${import.meta.env.VITE_API_BASE}/auth/signup`)
       const response = await api.post('/auth/signup', {
-
         user_id,
         name,
         email,
@@ -116,6 +119,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         role
       })
       
+      console.log('🔍 Signup response:', response.data)
       const { access_token, user: userData } = response.data
       setToken(access_token)
       setUser(userData)
@@ -123,6 +127,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       localStorage.setItem('auth_user', JSON.stringify(userData))
       api.defaults.headers.common['Authorization'] = `Bearer ${access_token}`
     } catch (error: any) {
+      console.error('🔍 Signup error:', error)
+      console.error('🔍 Error response:', error.response?.data)
       throw new Error(error.response?.data?.detail || 'Signup failed')
     }
   }
