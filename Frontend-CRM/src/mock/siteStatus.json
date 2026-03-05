@@ -1,0 +1,233 @@
+[
+  {
+    "studyId": "cec5861a-968e-4ec3-bc72-c941de10ea0e",
+    "siteId": "be80a03c-3e4a-4a15-8249-5ab91ff124e7",
+    "phases": [
+      {
+        "id": "phase-1",
+        "name": "Site Activation Phase",
+        "tasks": [
+          {
+            "id": "task-1-1",
+            "name": "Contract Negotiation",
+            "status": "completed"
+          },
+          {
+            "id": "task-1-2",
+            "name": "Budget Approval",
+            "status": "completed"
+          },
+          {
+            "id": "task-1-3",
+            "name": "IRB/EC Submission",
+            "status": "completed"
+          },
+          {
+            "id": "task-1-4",
+            "name": "Site Training Completion",
+            "status": "in_progress"
+          },
+          {
+            "id": "task-1-5",
+            "name": "Regulatory Documentation",
+            "status": "not_started"
+          }
+        ]
+      },
+      {
+        "id": "phase-2",
+        "name": "Patient Enrollment Phase",
+        "tasks": [
+          {
+            "id": "task-2-1",
+            "name": "Screen First Patient",
+            "status": "not_started"
+          },
+          {
+            "id": "task-2-2",
+            "name": "Enroll First Patient",
+            "status": "not_started"
+          },
+          {
+            "id": "task-2-3",
+            "name": "Reach 50% Enrollment Target",
+            "status": "not_started"
+          },
+          {
+            "id": "task-2-4",
+            "name": "Complete Full Enrollment",
+            "status": "not_started"
+          }
+        ]
+      },
+      {
+        "id": "phase-3",
+        "name": "Study Conduct Phase",
+        "tasks": [
+          {
+            "id": "task-3-1",
+            "name": "Patient Follow-up Visits",
+            "status": "not_started"
+          },
+          {
+            "id": "task-3-2",
+            "name": "Data Collection",
+            "status": "not_started"
+          },
+          {
+            "id": "task-3-3",
+            "name": "Adverse Event Reporting",
+            "status": "not_started"
+          },
+          {
+            "id": "task-3-4",
+            "name": "Protocol Compliance Monitoring",
+            "status": "not_started"
+          }
+        ]
+      },
+      {
+        "id": "phase-4",
+        "name": "Site Close-Out Phase",
+        "tasks": [
+          {
+            "id": "task-4-1",
+            "name": "Final Data Verification",
+            "status": "not_started"
+          },
+          {
+            "id": "task-4-2",
+            "name": "Drug Accountability",
+            "status": "not_started"
+          },
+          {
+            "id": "task-4-3",
+            "name": "Site Close-Out Visit",
+            "status": "not_started"
+          },
+          {
+            "id": "task-4-4",
+            "name": "Final Report Submission",
+            "status": "not_started"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "studyId": "d1234567-1234-1234-1234-123456789abc",
+    "siteId": "e2345678-2345-2345-2345-23456789abcd",
+    "phases": [
+      {
+        "id": "phase-1",
+        "name": "Site Activation Phase",
+        "tasks": [
+          {
+            "id": "task-1-1",
+            "name": "Contract Negotiation",
+            "status": "completed"
+          },
+          {
+            "id": "task-1-2",
+            "name": "Budget Approval",
+            "status": "completed"
+          },
+          {
+            "id": "task-1-3",
+            "name": "IRB/EC Submission",
+            "status": "completed"
+          },
+          {
+            "id": "task-1-4",
+            "name": "Site Training Completion",
+            "status": "completed"
+          },
+          {
+            "id": "task-1-5",
+            "name": "Regulatory Documentation",
+            "status": "completed"
+          }
+        ]
+      },
+      {
+        "id": "phase-2",
+        "name": "Patient Enrollment Phase",
+        "tasks": [
+          {
+            "id": "task-2-1",
+            "name": "Screen First Patient",
+            "status": "completed"
+          },
+          {
+            "id": "task-2-2",
+            "name": "Enroll First Patient",
+            "status": "completed"
+          },
+          {
+            "id": "task-2-3",
+            "name": "Reach 50% Enrollment Target",
+            "status": "in_progress"
+          },
+          {
+            "id": "task-2-4",
+            "name": "Complete Full Enrollment",
+            "status": "not_started"
+          }
+        ]
+      },
+      {
+        "id": "phase-3",
+        "name": "Study Conduct Phase",
+        "tasks": [
+          {
+            "id": "task-3-1",
+            "name": "Patient Follow-up Visits",
+            "status": "in_progress"
+          },
+          {
+            "id": "task-3-2",
+            "name": "Data Collection",
+            "status": "in_progress"
+          },
+          {
+            "id": "task-3-3",
+            "name": "Adverse Event Reporting",
+            "status": "not_started"
+          },
+          {
+            "id": "task-3-4",
+            "name": "Protocol Compliance Monitoring",
+            "status": "not_started"
+          }
+        ]
+      },
+      {
+        "id": "phase-4",
+        "name": "Site Close-Out Phase",
+        "tasks": [
+          {
+            "id": "task-4-1",
+            "name": "Final Data Verification",
+            "status": "not_started"
+          },
+          {
+            "id": "task-4-2",
+            "name": "Drug Accountability",
+            "status": "not_started"
+          },
+          {
+            "id": "task-4-3",
+            "name": "Site Close-Out Visit",
+            "status": "not_started"
+          },
+          {
+            "id": "task-4-4",
+            "name": "Final Report Submission",
+            "status": "not_started"
+          }
+        ]
+      }
+    ]
+  }
+]
+
