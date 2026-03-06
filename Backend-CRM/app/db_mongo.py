@@ -21,16 +21,16 @@ async def get_mongo_client() -> AsyncIOMotorClient:
         # Add connection timeout and server selection timeout to prevent hanging
         _mongo_client = AsyncIOMotorClient(
             settings.mongodb_uri,
-            serverSelectionTimeoutMS=3000,  # 3 second timeout - fail fast
-            connectTimeoutMS=3000,
-            socketTimeoutMS=10000,  # 10 second socket timeout
+            serverSelectionTimeoutMS=15000,  # 15 seconds - more time for DNS resolution
+            connectTimeoutMS=10000,  # 10 second connection timeout
+            socketTimeoutMS=30000,  # 30 second socket timeout
             maxPoolSize=10,  # Limit connection pool
             minPoolSize=1
         )
         # Test connection with timeout - but don't block if it fails
         try:
             import asyncio
-            await asyncio.wait_for(_mongo_client.admin.command('ping'), timeout=3.0)
+            await asyncio.wait_for(_mongo_client.admin.command('ping'), timeout=15.0)
             logger.info("[MONGO] MongoDB connection successful")
         except asyncio.TimeoutError:
             logger.warning("[MONGO] MongoDB connection timed out - will retry on use")
