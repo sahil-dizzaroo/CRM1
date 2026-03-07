@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Header, Query, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, and_, delete, update, func
@@ -4458,6 +4458,11 @@ async def download_signed_agreement_pdf(
 # Study Template Management Endpoints
 # ---------------------------------------------------------------------------
 
+@router.post("/test-endpoint")
+async def test_endpoint():
+    print("🔍 TEST ENDPOINT CALLED!")
+    return {"message": "Test endpoint working"}
+
 @router.post("/studies/{study_id}/templates", response_model=schemas.StudyTemplateResponse)
 async def create_study_template(
     study_id: UUID,
@@ -4473,137 +4478,195 @@ async def create_study_template(
     DOCX files are automatically converted to HTML and then to TipTap JSON format.
     Preserves formatting, tables, images, and layout.
     """
-    # Validate study exists
-    study_result = await db.execute(
-        select(Study).where(Study.id == study_id)
-    )
-    study = study_result.scalar_one_or_none()
-    
-    if not study:
-        raise HTTPException(status_code=404, detail="Study not found")
-    
-    # Validate template type enum
-    try:
-        template_type_enum = TemplateType(template_type.upper())
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid template type: {template_type}"
-        )
-    
-    # Validate file type - DOCX only
-    if not template_file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-    
-    file_extension = Path(template_file.filename).suffix.lower()
-    if file_extension not in ['.docx', '.doc']:
-        raise HTTPException(
-            status_code=400,
-            detail="Only DOCX files are supported. Please upload a .docx file. PDF uploads are no longer supported."
-        )
-    
-    # Save uploaded DOCX file permanently
-    upload_dir = Path(settings.upload_dir) / "templates"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Generate unique filename
-    file_id = uuid.uuid4()
-    file_name = f"template_{file_id}.docx"
-    template_file_path = upload_dir / file_name
+    print(f"🔍 Template upload started - study_id: {study_id}, template_name: {template_name}, template_type: {template_type}")
+    logger.info(f"🔍 Template upload started - study_id: {study_id}, template_name: {template_name}, template_type: {template_type}")
     
     try:
-        # Save uploaded file
-        with open(template_file_path, "wb") as buffer:
-            shutil.copyfileobj(template_file.file, buffer)
+        # Validate study exists
+        logger.info("🔍 Validating study exists...")
+        study_result = await db.execute(
+            select(Study).where(Study.id == study_id)
+        )
+        study = study_result.scalar_one_or_none()
         
-        logger.info(f"Saved template DOCX file: {template_file_path}")
+        if not study:
+            logger.error(f"❌ Study not found: {study_id}")
+            raise HTTPException(status_code=404, detail="Study not found")
         
-        # For backward compatibility, still detect placeholders from DOCX content
-        # We'll read the DOCX to detect placeholders for configuration
-        from docx import Document
-        doc = Document(template_file_path)
+        logger.info(f"✅ Study found: {study.name}")
+        
+        # Validate template type enum
+        logger.info("🔍 Validating template type...")
+        try:
+            template_type_enum = TemplateType(template_type.upper())
+            logger.info(f"✅ Template type valid: {template_type_enum}")
+        except ValueError as e:
+            logger.error(f"❌ Invalid template type: {template_type}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid template type: {template_type}"
+            )
+        
+        # Validate file type - DOCX only
+        logger.info("🔍 Validating file type...")
+        if not template_file.filename:
+            logger.error("❌ No file provided")
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        file_extension = Path(template_file.filename).suffix.lower()
+        if file_extension not in ['.docx', '.doc']:
+            logger.error(f"❌ Invalid file extension: {file_extension}")
+            raise HTTPException(
+                status_code=400,
+                detail="Only DOCX files are supported. Please upload a .docx file. PDF uploads are no longer supported."
+            )
+        
+        logger.info(f"✅ File validation passed: {template_file.filename}")
+        
+        # Save uploaded DOCX file to Azure Blob Storage or local storage
+        logger.info("🔍 Starting file upload process...")
+        from app.azure_storage import azure_storage
+        
+        # Generate unique filename
+        logger.info("🔍 Generating unique filename...")
+        file_id = uuid.uuid4()
+        file_name = f"template_{file_id}.docx"
+        logger.info(f"✅ Generated filename: {file_name}")
+        
+        # Reset file pointer
+        template_file.file.seek(0)
+        
+        # Try Azure storage first, fallback to local
+        logger.info("🔍 Attempting Azure upload...")
+        template_file_path = None
+        azure_blob_url = None
+        
+        try:
+            # Upload to Azure Blob Storage
+            azure_blob_url = await azure_storage.upload_file(
+                template_file.file, 
+                file_name, 
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            
+            if azure_blob_url:
+                template_file_path = azure_blob_url
+                logger.info(f"✅ Template uploaded to Azure: {azure_blob_url}")
+                print(f"✅ AZURE UPLOAD SUCCESS: {azure_blob_url}")  # Add print for immediate visibility
+            else:
+                # Fallback to local storage
+                logger.info("🔍 Azure upload failed, using local storage...")
+                print("🔍 AZURE UPLOAD FAILED, FALLBACK TO LOCAL")  # Add print for immediate visibility
+                upload_dir = Path(settings.upload_dir) / "templates"
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                template_file_path = upload_dir / file_name
+                
+                # Reset file pointer again for local upload
+                template_file.file.seek(0)
+                with open(template_file_path, "wb") as buffer:
+                    shutil.copyfileobj(template_file.file, buffer)
+                
+                logger.info(f"✅ Template saved locally: {template_file_path}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error uploading to Azure: {e}")
+            # Fallback to local storage
+            upload_dir = Path(settings.upload_dir) / "templates"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            template_file_path = upload_dir / file_name
+            
+            # Reset file pointer again for local upload
+            template_file.file.seek(0)
+            with open(template_file_path, "wb") as buffer:
+                shutil.copyfileobj(template_file.file, buffer)
+            
+            logger.info(f"✅ Template saved locally (fallback): {template_file_path}")
+        
+        # For placeholder detection, we need the file content
+        # If using Azure, download temporarily; if local, read directly
+        doc_content = None
         placeholder_text = ""
-        for paragraph in doc.paragraphs:
-            placeholder_text += paragraph.text + "\n"
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    placeholder_text += cell.text + "\n"
+        placeholder_config = {}  # Default to empty for now
         
-        # Detect placeholders using regex
-        import re
-        placeholder_pattern = r'\{\{([A-Z_]+)\}\}'
-        detected_placeholders = set(re.findall(placeholder_pattern, placeholder_text))
-        
-        # Create placeholder configuration
-        placeholder_config = {}
-        for p_name in sorted(list(detected_placeholders)):
-            placeholder_config[p_name] = {"editable": True}
+        # Temporarily disable docx processing to isolate the issue
+        logger.info("Template upload: Using placeholder_config = {} for now")
         
         # Parse field_mappings if provided
         parsed_field_mappings = None
         if field_mappings:
+            logger.info("🔍 Parsing field mappings...")
             try:
                 import json
                 parsed_field_mappings = json.loads(field_mappings)
                 if not isinstance(parsed_field_mappings, dict):
                     raise ValueError("field_mappings must be a JSON object")
-                logger.info(f"Parsed field_mappings: {parsed_field_mappings}")
+                logger.info(f"✅ Parsed field_mappings: {parsed_field_mappings}")
             except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON in field_mappings: {e}")
+                logger.warning(f"❌ Invalid JSON in field_mappings: {e}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Invalid JSON in field_mappings: {str(e)}"
                 )
             except Exception as e:
-                logger.warning(f"Error parsing field_mappings: {e}")
+                logger.warning(f"❌ Error parsing field_mappings: {e}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Error parsing field_mappings: {str(e)}"
                 )
         
+        # Create template with DOCX file path
+        logger.info("🔍 Creating template record...")
+        template = StudyTemplate(
+            study_id=study.id,
+            template_name=template_name,
+            template_type=template_type_enum,
+            template_content=None,  # No longer storing JSON, using DOCX only
+            template_file_path=str(template_file_path),  # Store DOCX file path
+            document_html='',  # Empty string for DOCX-based templates (legacy field)
+            placeholder_config=placeholder_config,  # Auto-detected placeholder configuration
+            field_mappings=parsed_field_mappings,  # Dynamic field mappings
+            created_by=current_user.get("user_id") if current_user else None,
+            is_active='true',
+        )
+        
+        logger.info("🔍 Saving template to database...")
+        print("🔍 SAVING TEMPLATE TO DATABASE...")
+        db.add(template)
+        await db.flush()
+        print("✅ FLUSH COMPLETED")
+        await db.commit()
+        print("✅ COMMIT COMPLETED")
+        await db.refresh(template)
+        print(f"✅ TEMPLATE SAVED: {template.id}")
+        
+        logger.info(f"✅ Template created successfully: {template.id}")
+        
+        return {
+            "id": template.id,
+            "study_id": template.study_id,
+            "template_name": template.template_name,
+            "template_type": template.template_type.value,
+            "template_content": template.template_content if hasattr(template, 'template_content') and template.template_content else {"type": "doc", "content": []},
+            "placeholder_config": template.placeholder_config if hasattr(template, 'placeholder_config') and template.placeholder_config else {},
+            "created_by": template.created_by,
+            "created_at": template.created_at,
+            "updated_at": template.updated_at,
+            "is_active": template.is_active,
+        }
+        
     except HTTPException:
+        # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Failed to process DOCX template: {str(e)}")
-        # Clean up file if processing failed
-        if template_file_path.exists():
-            template_file_path.unlink()
+        logger.error(f"❌ Unexpected error in template upload: {e}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        print(f"❌ ERROR: {e}")  # Add print for immediate visibility
+        print(f"❌ TRACEBACK: {traceback.format_exc()}")  # Add print for immediate visibility
         raise HTTPException(
-            status_code=400,
-            detail=f"Failed to process DOCX file: {str(e)}"
+            status_code=500,
+            detail=f"Failed to upload template: {str(e)}"
         )
-    
-    # Create template with DOCX file path
-    template = StudyTemplate(
-        study_id=study.id,
-        template_name=template_name,
-        template_type=template_type_enum,
-        template_content=None,  # No longer storing JSON, using DOCX only
-        template_file_path=str(template_file_path),  # Store DOCX file path
-        document_html='',  # Empty string for DOCX-based templates (legacy field)
-        placeholder_config=placeholder_config,  # Auto-detected placeholder configuration
-        field_mappings=parsed_field_mappings,  # Dynamic field mappings
-        created_by=current_user.get("user_id") if current_user else None,
-        is_active='true',
-    )
-    db.add(template)
-    await db.flush()
-    await db.commit()
-    await db.refresh(template)
-    
-    return {
-        "id": template.id,
-        "study_id": template.study_id,
-        "template_name": template.template_name,
-        "template_type": template.template_type.value,
-        "template_content": template.template_content if hasattr(template, 'template_content') and template.template_content else {"type": "doc", "content": []},
-        "placeholder_config": template.placeholder_config if hasattr(template, 'placeholder_config') and template.placeholder_config else {},
-        "created_by": template.created_by,
-        "created_at": template.created_at,
-        "updated_at": template.updated_at,
-        "is_active": template.is_active,
-    }
 
 
 @router.get("/studies/{study_id}/templates", response_model=List[schemas.StudyTemplateResponse])
@@ -4719,19 +4782,129 @@ async def get_template_detail(
     }
 
 
-@router.get("/templates/{template_id}/template-file")
-async def get_template_file(
+@router.get("/templates/{template_id}/onlyoffice-config")
+async def get_template_onlyoffice_config(
     template_id: UUID,
     current_user: Optional[dict] = Depends(get_current_user_optional),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Get template DOCX file for ONLYOFFICE viewing.
+    Get ONLYOFFICE configuration for template editing/viewing.
+    """
+    from app.config import settings
+    import secrets
+    import time
     
+    template_result = await db.execute(
+        select(StudyTemplate).where(StudyTemplate.id == template_id)
+    )
+    template = template_result.scalar_one_or_none()
+    
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    # Get template file URL
+    if not hasattr(template, 'template_file_path') or not template.template_file_path:
+        raise HTTPException(
+            status_code=404,
+            detail="Template file not found"
+        )
+    
+    # Build file URL - use backend URL for ONLYOFFICE callback
+    file_url = f"{settings.backend_internal_url}/api/templates/{template_id}/template-file"
+    
+    # Generate document key for ONLYOFFICE
+    document_key = f"template_{template_id}_{int(time.time())}"
+    
+    # Build complete config object FIRST
+    config = {
+        "document": {
+            "fileType": "docx",
+            "key": document_key,
+            "title": template.template_name,
+            "url": file_url,
+            "permissions": {
+                "comment": False,
+                "copy": True,
+                "download": True,
+                "edit": False,  # Templates are view-only
+                "fillForms": False,
+                "modifyFilter": False,
+                "modifyContentControl": False,
+                "review": False,
+                "print": True
+            }
+        },
+        "documentType": "word",
+        "editorConfig": {
+            "mode": "view",
+            "lang": "en",
+            "callbackUrl": f"{settings.backend_internal_url}/api/templates/{template_id}/onlyoffice-callback",
+            "user": {
+                "id": current_user.get("user_id", "anonymous") if current_user else "anonymous",
+                "name": current_user.get("email", "Anonymous User") if current_user else "Anonymous User"
+            },
+            "customization": {
+                "autosave": False,
+                "comments": False,
+                "compactHeader": False,
+                "compactToolbar": False,
+                "compatibleFeatures": False,
+                "help": True,
+                "hideRightMenu": False,
+                "logo": {
+                    "image": "",
+                    "imageEmbedded": "",
+                    "url": ""
+                },
+                "macros": False,
+                "macrosMode": "warn",
+                "mentionShare": False,
+                "plugins": False,
+                "review": {
+                    "hideReviewDisplay": False,
+                    "showReviewChanges": False,
+                    "reviewDisplay": "original",
+                    "trackChanges": False,
+                    "hoverMode": False
+                },
+                "showReviewChanges": False,
+                "spellcheck": False,
+                "toolbarNoTabs": False,
+                "toolbarHideFileName": False,
+                "unit": "cm",
+                "zoom": 100
+            }
+        },
+        "height": "100%",
+        "width": "100%"
+    }
+    
+    # FIX: Sign ENTIRE config object, not just partial payload
+    if settings.onlyoffice_jwt_secret:
+        import jwt
+        # Create a copy to avoid circular references/mutation issues
+        payload = config.copy()
+        token = jwt.encode(payload, settings.onlyoffice_jwt_secret, algorithm="HS256")
+        config["token"] = token
+    
+    return {
+        "editorUrl": f"{settings.onlyoffice_public_url}/web-apps/apps/api/documents/api.js",
+        "config": config
+    }
+
+
+@router.get("/templates/{template_id}/template-file")
+async def get_template_file(
+    template_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
     Returns:
         DOCX file response
     """
-    from fastapi.responses import FileResponse
+    from fastapi.responses import Response
+    from app.azure_storage import azure_storage
     
     template_result = await db.execute(
         select(StudyTemplate).where(StudyTemplate.id == template_id)
@@ -4748,87 +4921,77 @@ async def get_template_file(
             detail="Template file not found"
         )
     
-    file_path = Path(template.template_file_path)
-    if not file_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Template file not found at: {template.template_file_path}"
+    file_path = template.template_file_path
+    
+    # Check if it's an Azure URL or local file
+    if file_path.startswith("https://") and ".blob.core.windows.net/" in file_path:
+        # Azure Blob Storage - download and serve
+        try:
+            # Extract blob name from URL
+            blob_name = file_path.split("/")[-1]
+            print(f"🔍 Attempting to download blob: {blob_name}")
+            logger.info(f"🔍 Attempting to download blob: {blob_name}")
+            
+            file_data = await azure_storage.download_file(blob_name)
+            
+            if not file_data:
+                print(f"❌ Failed to download blob: {blob_name}")
+                logger.error(f"❌ Failed to download blob: {blob_name}")
+                raise HTTPException(
+                    status_code=404,
+                    detail="Template file not found in Azure storage"
+                )
+            
+            print(f"✅ Successfully downloaded blob: {blob_name}, size: {len(file_data)} bytes")
+            logger.info(f"✅ Successfully downloaded blob: {blob_name}, size: {len(file_data)} bytes")
+            
+            # Add CORS headers for ONLYOFFICE to access the document
+            headers = {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            }
+            
+            return Response(
+                content=file_data,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": f"attachment; filename=template_{template_id}_{template.template_name}.docx",
+                    **headers
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Error downloading template from Azure: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Error retrieving template from cloud storage"
+            )
+    
+    else:
+        # Local file - serve directly
+        local_file_path = Path(file_path)
+        if not local_file_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Template file not found at: {file_path}"
+            )
+        
+        # Add CORS headers for ONLYOFFICE to access the document
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+        
+        return FileResponse(
+            path=str(local_file_path),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"template_{template_id}_{template.template_name}.docx",
+            headers=headers
         )
-    
-    # Add CORS headers for ONLYOFFICE to access the document
-    headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    }
-    
-    return FileResponse(
-        path=str(file_path),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=f"template_{template_id}_{template.template_name}.docx",
-        headers=headers
-    )
 
 
-@router.get("/templates/{template_id}/onlyoffice-config")
-async def get_template_onlyoffice_config(
-    template_id: UUID,
-    request: Request,
-    current_user: Optional[dict] = Depends(get_current_user_optional),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Get ONLYOFFICE editor configuration for viewing a template document.
-    
-    Returns:
-        Configuration object for ONLYOFFICE editor initialization (read-only mode)
-    """
-    from app.utils.onlyoffice_utils import create_document_config, get_onlyoffice_editor_url
-    from fastapi.responses import JSONResponse
-    
-    template_result = await db.execute(
-        select(StudyTemplate).where(StudyTemplate.id == template_id)
-    )
-    template = template_result.scalar_one_or_none()
-    
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
-    
-    # Check if template has DOCX file
-    if not hasattr(template, 'template_file_path') or not template.template_file_path:
-        raise HTTPException(
-            status_code=400,
-            detail="Template does not have a DOCX file."
-        )
-    
-    # Get user info
-    user_id = current_user.get("user_id", "anonymous") if current_user else "anonymous"
-    user_name = current_user.get("name", "User") if current_user else "User"
-    
-    # Create document URL using configured backend internal URL
-    internal_base = settings.backend_internal_url
-    document_url = f"{internal_base}/api/templates/{template_id}/template-file"
-    
-    # Generate document key (unique identifier for ONLYOFFICE)
-    document_key = str(template.id)
-    
-    # Create configuration in view mode (read-only for templates)
-    config = create_document_config(
-        document_url=document_url,
-        callback_url="",  # No callback needed for template viewing
-        document_key=document_key,
-        document_title=template.template_name,
-        user_id=user_id,
-        user_name=user_name,
-        mode="view"  # Always view mode for templates
-    )
-    
-    logger.info(f"ONLYOFFICE template config - document_url: {document_url}, template_id: {template_id}")
-    
-    return JSONResponse(content={
-        "editorUrl": get_onlyoffice_editor_url(),
-        "config": config
-    })
 
 
 @router.patch("/templates/{template_id}/deactivate")

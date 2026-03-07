@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     # ONLYOFFICE Document Server
     # -------------------------------------------------
     onlyoffice_url: str = "http://onlyoffice:80"  # Internal Docker network URL
-    onlyoffice_public_url: Optional[str] = None  # Public URL for frontend (defaults to onlyoffice_url if not set)
+    onlyoffice_public_url: str = "http://localhost:8080"  # Public URL for frontend (defaults to onlyoffice_url if not set)
     onlyoffice_jwt_secret: Optional[str] = None  # JWT secret for secure communication
     onlyoffice_jwt_enabled: bool = True  # Enable JWT for security
 
@@ -126,7 +126,13 @@ class Settings(BaseSettings):
     # Used when external services (OnlyOffice) need to call back into the backend.
     # Default works for local docker-compose (service name "backend").
     # In production (e.g. Azure App Service), set BACKEND_INTERNAL_URL to the public HTTPS URL.
-    backend_internal_url: str = "http://backend:8000"
+    backend_internal_url: str = "http://host.docker.internal:8000"
+
+    # -------------------------------------------------
+    # Azure Blob Storage
+    # -------------------------------------------------
+    azure_storage_connection_string: Optional[str] = None
+    azure_storage_container_name: str = "crm-templates"
 
     # -------------------------------------------------
     # Pydantic config

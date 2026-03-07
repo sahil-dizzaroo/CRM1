@@ -602,7 +602,8 @@ const OnlyOfficeEditor: React.FC<OnlyOfficeEditorProps> = ({
         }}
       >
         <div
-          id="onlyoffice-editor"
+          // FIX: Make ID dynamic so React Strict Mode doesn't cause DOM collisions
+          id={`onlyoffice-editor-${templateId || agreementId || 'fallback'}`}
           ref={editorRef}
           style={{ 
             width: '100%', 

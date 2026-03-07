@@ -34,6 +34,42 @@ import logging
 router = APIRouter(tags=["Clinical Workflow"])
 logger = logging.getLogger(__name__)
 
+@router.get("/studies")
+async def get_studies(
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get all studies for the current user.
+    Returns list of studies that can be used for template uploads.
+    """
+    try:
+        # Get all studies (for now, return all active studies)
+        result = await db.execute(
+            select(Study).where(Study.status == 'active').order_by(Study.name)
+        )
+        studies = result.scalars().all()
+        
+        # Convert to response format
+        study_list = []
+        for study in studies:
+            study_list.append({
+                "id": str(study.id),
+                "study_id": study.study_id,
+                "name": study.name,
+                "description": study.description,
+                "status": study.status
+            })
+        
+        return study_list
+        
+    except Exception as e:
+        logger.error(f"Error getting studies: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get studies: {str(e)}"
+        )
+
 @router.get("/site-status/summary", response_model=schemas.StudyStatusSummary)
 async def get_site_status_summary(
     study_id: str = Query(..., description="Study UUID or external study_id string"),
