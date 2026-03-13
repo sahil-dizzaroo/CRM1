@@ -1,0 +1,1071 @@
+"""
+DOCX Placeholder Replacement Utility
+
+Replaces placeholders in DOCX files using python-docx library.
+Preserves formatting, tables, images, and layout.
+Supports dynamic field mappings from template configuration.
+
+Also provides helper utilities for enforcing locked (non-editable)
+placeholder values across document versions.
+"""
+
+import io
+import logging
+from pathlib import Path
+from typing import Optional, Dict, Any, Tuple
+
+from docx import Document
+from docx.shared import Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+from app.models import SiteProfile, Agreement
+
+logger = logging.getLogger(__name__)
+
+# Legacy mapping for backward compatibility (used for signature blocks)
+LEGACY_PLACEHOLDER_MAP = {
+    "SITE_NAME": "site_name",
+    "HOSPITAL_NAME": "hospital_name",
+    "PI_NAME": "pi_name",
+    "PI_EMAIL": "pi_email",
+    "PI_PHONE": "pi_phone",
+    "PRIMARY_CONTRACTING_ENTITY": "primary_contracting_entity",
+    "AUTHORIZED_SIGNATORY_NAME": "authorized_signatory_name",
+    "AUTHORIZED_SIGNATORY_EMAIL": "authorized_signatory_email",
+    "AUTHORIZED_SIGNATORY_TITLE": "authorized_signatory_title",
+    "ADDRESS_LINE_1": "address_line_1",
+    "CITY": "city",
+    "STATE": "state",
+    "COUNTRY": "country",
+    "POSTAL_CODE": "postal_code",
+}
+
+
+def get_placeholder_value_from_mapping(
+    placeholder_name: str,
+    field_mappings: Optional[Dict[str, str]],
+    site_profile: Optional[SiteProfile] = None,
+    agreement: Optional[Agreement] = None,
+) -> Optional[str]:
+    """
+    Get the value for a placeholder using dynamic field mappings.
+    
+    Args:
+        placeholder_name: The placeholder name (e.g., "SITE_NAME")
+        field_mappings: Dict mapping placeholder names to data source paths (e.g., {"SITE_NAME": "site_profile.site_name"})
+        site_profile: The SiteProfile instance
+        agreement: The Agreement instance
+        
+    Returns:
+        The value from the data source as a string, or None if:
+        - No explicit field mapping exists for this placeholder
+        - The data source object is missing
+        - The resolved field value is null
+        
+        IMPORTANT: Placeholders without explicit field mappings will remain unchanged.
+        No fallback to legacy mapping is used.
+    """
+    mapping_path: Optional[str] = None
+
+    # Only use explicit field_mappings from template configuration
+    # NO FALLBACK to legacy mapping - placeholders without mapping should remain unchanged
+    if field_mappings:
+        mapping_path = field_mappings.get(placeholder_name.upper())
+        if not mapping_path:
+            logger.debug(
+                "No explicit field_mappings entry for placeholder '%s'; "
+                "placeholder will remain unchanged.",
+                placeholder_name,
+            )
+            return None
+    else:
+        logger.debug(
+            "No field_mappings provided for placeholder '%s'; "
+            "placeholder will remain unchanged.",
+            placeholder_name,
+        )
+        return None
+    
+    # Parse the mapping path (format: "data_source.field_name")
+    parts = mapping_path.split(".", 1)
+    if len(parts) != 2:
+        logger.warning(
+            "Invalid mapping path format for placeholder %s: %s. Expected format: 'data_source.field_name'",
+            placeholder_name,
+            mapping_path,
+        )
+        return None
+    
+    data_source, field_name = parts[0].lower(), parts[1]
+    
+    # Get value from appropriate data source
+    value = None
+    if data_source == "site_profile":
+        if not site_profile:
+            logger.warning("SiteProfile not provided for placeholder: %s", placeholder_name)
+            return None
+        value = getattr(site_profile, field_name, None)
+    elif data_source == "agreement":
+        if not agreement:
+            logger.warning("Agreement not provided for placeholder: %s", placeholder_name)
+            return None
+        value = getattr(agreement, field_name, None)
+    else:
+        logger.warning(
+            "Unknown data source '%s' for placeholder: %s (mapping_path=%s)",
+            data_source,
+            placeholder_name,
+            mapping_path,
+        )
+        return None
+    
+    # Return None if value is null so that caller can decide whether to keep placeholder
+    if value is None:
+        logger.debug(
+            "Field %s from %s is null for placeholder: %s (placeholder left unchanged)",
+            field_name,
+            data_source,
+            placeholder_name,
+        )
+        return None
+    
+    return str(value)
+
+
+def get_placeholder_value(placeholder_name: str, profile: SiteProfile) -> str:
+    """
+    Legacy function for backward compatibility.
+    Get the value for a placeholder from SiteProfile using legacy mapping.
+    
+    Args:
+        placeholder_name: The placeholder name (e.g., "PI_NAME")
+        profile: The SiteProfile instance
+        
+    Returns:
+        The value from SiteProfile, or empty string if not found
+    """
+    field_name = LEGACY_PLACEHOLDER_MAP.get(placeholder_name.upper())
+    if not field_name:
+        return ""
+    
+    value = getattr(profile, field_name, None)
+    return str(value) if value is not None else ""
+
+
+def replace_placeholders_in_docx(
+    docx_path: Path,
+    profile: SiteProfile,
+    output_path: Path,
+    sponsor_signatory_name: Optional[str] = None,
+    sponsor_signatory_email: Optional[str] = None,
+    current_user_email: Optional[str] = None,
+    field_mappings: Optional[Dict[str, str]] = None,
+    agreement: Optional[Agreement] = None,
+    template_id: Optional[str] = None,
+    placeholder_config: Optional[Dict[str, Dict[str, bool]]] = None
+) -> Path:
+    """
+    Replace placeholders in a DOCX file and save to output path.
+    Uses dynamic field_mappings if provided, otherwise falls back to legacy mapping.
+
+    Editability rules (driven purely by placeholder_config):
+      - If editable == True  → insert an EDITABLE content control (w:sdt) for the value.
+      - If editable == False → insert the value as plain static text (no content control).
+
+    When a template has a placeholder_config, the generated DOCX is placed into
+    Word "forms" protection mode so that ONLY the editable content controls can
+    be modified in ONLYOFFICE / Word. All other text is read-only.
+
+    Args:
+        docx_path: Path to source DOCX file
+        profile: SiteProfile instance
+        output_path: Path to save the modified DOCX
+        sponsor_signatory_name: Optional sponsor signatory name
+        sponsor_signatory_email: Optional sponsor signatory email
+        current_user_email: Optional current user email for fallback
+        field_mappings: Optional dict mapping placeholder names to data source paths
+        agreement: Optional Agreement instance for agreement-based placeholders
+        template_id: Optional template ID for logging
+        placeholder_config: Optional dict mapping placeholder names to config:
+            {"PLACEHOLDER": {"editable": true/false}}
+
+    Returns:
+        Path to the output DOCX file
+    """
+    try:
+        logger.info(f"Starting placeholder replacement for template_id: {template_id}, output: {output_path}")
+        
+        # Open the document
+        doc = Document(docx_path)
+        
+        # Determine which mapping to use
+        use_dynamic_mapping = field_mappings is not None and len(field_mappings) > 0
+        
+        if use_dynamic_mapping:
+            logger.info(f"Using dynamic field_mappings: {field_mappings}")
+            # Extract all placeholders from the document
+            placeholders_found = _extract_placeholders_from_docx(doc)
+            logger.info(f"Found {len(placeholders_found)} unique placeholders in document")
+            
+            # Create a mapping of placeholder text to replacement value
+            placeholder_replacements = {}
+            for placeholder_name in placeholders_found:
+                # Skip signature blocks - handled separately
+                if placeholder_name in ["SITE_SIGNATURE_BLOCK", "SPONSOR_SIGNATURE_BLOCK"]:
+                    continue
+                
+                value = get_placeholder_value_from_mapping(
+                    placeholder_name,
+                    field_mappings,
+                    site_profile=profile,
+                    agreement=agreement,
+                )
+                
+                placeholder_text = f"{{{{{placeholder_name}}}}}"
+                
+                # Check if this placeholder is editable
+                is_editable = True  # Default to editable if no config
+                if placeholder_config:
+                    placeholder_cfg = placeholder_config.get(placeholder_name, {})
+                    is_editable = placeholder_cfg.get("editable", True)  # Default to True if not specified
+                
+                # Store replacement info
+                if value is not None:
+                    placeholder_replacements[placeholder_text] = {
+                        'value': str(value),
+                        'editable': is_editable,
+                        'name': placeholder_name
+                    }
+                    logger.debug(f"Will replace {placeholder_name} with value: {value} (editable={is_editable})")
+                else:
+                    logger.warning(
+                        "Placeholder %s left unchanged (no value or mapping or null value)",
+                        placeholder_name,
+                    )
+            
+            # Apply all replacements in one pass through the document
+            replacements_made = 0
+            for paragraph in doc.paragraphs:
+                replacements_made += _replace_placeholders_in_paragraph(
+                    paragraph, placeholder_replacements
+                )
+            
+            # Apply replacements in tables
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            replacements_made += _replace_placeholders_in_paragraph(
+                                paragraph, placeholder_replacements
+                            )
+            
+            logger.info(f"Placeholder replacement complete: {replacements_made} replacements made")
+        else:
+            logger.info("Using legacy placeholder mapping (no field_mappings provided)")
+            # Use legacy mapping for backward compatibility
+            for placeholder_name, field_name in LEGACY_PLACEHOLDER_MAP.items():
+                placeholder = f"{{{{{placeholder_name}}}}}"
+                value = get_placeholder_value(placeholder_name, profile)
+                
+                # Replace in paragraphs
+                for paragraph in doc.paragraphs:
+                    if placeholder in paragraph.text:
+                        
+for run in paragraph.runs:
+    if placeholder in run.text:
+        run.text = run.text.replace(placeholder, value)
+                
+                # Replace in tables
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for paragraph in cell.paragraphs:
+                                if placeholder in paragraph.text:
+                                    
+for run in paragraph.runs:
+    if placeholder in run.text:
+        run.text = run.text.replace(placeholder, value)
+        
+        # Handle signature block placeholders (always use legacy logic)
+        _replace_signature_blocks_in_docx(
+            doc,
+            profile,
+            sponsor_signatory_name,
+            sponsor_signatory_email,
+            current_user_email
+        )
+        
+        # Apply document protection for templates that have placeholder_config:
+        # - Entire document is put into "forms" protection mode.
+        # - ONLY content controls (editable placeholders) remain editable.
+        #
+        # For templates WITHOUT placeholder_config (legacy/unconfigured templates),
+        # we intentionally SKIP protection to avoid changing existing behavior.
+        if placeholder_config is not None:
+            editable_field_names = [
+                name for name, cfg in placeholder_config.items()
+                if cfg.get("editable", True)
+            ]
+            logger.info(
+                "Applying document protection for template_id=%s. "
+                "Editable placeholders: %s",
+                template_id,
+                ", ".join(editable_field_names) if editable_field_names else "none",
+            )
+            try:
+                _apply_restricted_editing_protection(doc)
+                logger.info("Document protection applied successfully")
+            except Exception as e:
+                logger.error(
+                    "Failed to apply document protection; document will remain fully editable. "
+                    "Error: %s",
+                    e,
+                    exc_info=True,
+                )
+        
+        # Save the modified document
+        doc.save(output_path)
+        logger.info(f"Successfully replaced placeholders in DOCX: {output_path}")
+        
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Failed to replace placeholders in DOCX: {str(e)}", exc_info=True)
+        raise Exception(f"Failed to process DOCX file: {str(e)}")
+
+
+def _extract_placeholders_from_docx(doc: Document) -> set:
+    """
+    Extract all placeholder names from a DOCX document.
+    
+    Args:
+        doc: python-docx Document object
+        
+    Returns:
+        Set of placeholder names (without {{ }})
+    """
+    import re
+    placeholders = set()
+    pattern = r'\{\{([A-Z0-9_]+)\}\}'
+    
+    # Extract from paragraphs
+    for paragraph in doc.paragraphs:
+        matches = re.findall(pattern, paragraph.text)
+        placeholders.update(matches)
+    
+    # Extract from tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    matches = re.findall(pattern, paragraph.text)
+                    placeholders.update(matches)
+    
+    return placeholders
+
+
+def _apply_restricted_editing_protection(doc: Document) -> None:
+    """
+    Apply Word document protection to restrict editing to content controls only.
+    
+    This makes the entire document read-only except for editable content controls.
+    Users can only edit text inside content controls; all other text is protected.
+    
+    Args:
+        doc: Document object to protect
+    """
+    try:
+        # Get the document's settings part
+        # Document protection is stored in settings.xml
+        # python-docx stores settings in part.related_parts
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        
+        # Get settings part from related parts
+        settings_part = None
+        for rel in doc.part.rels.values():
+            if rel.reltype == RT.SETTINGS:
+                settings_part = rel.target_part
+                break
+        
+        if settings_part is None:
+            logger.warning("Settings part not found - document protection cannot be applied. Document will work but editing may not be restricted.")
+            return
+        
+        settings_xml = settings_part.element
+        
+        # Check if documentProtection already exists
+        doc_protection = settings_xml.find(qn('w:documentProtection'))
+        
+        if doc_protection is None:
+            # Create new documentProtection element
+            doc_protection = OxmlElement('w:documentProtection')
+            settings_xml.append(doc_protection)
+        
+        # Set protection attributes:
+        # - w:enforcement="1" - Enable protection
+        # - w:edit="forms" - Allow editing only in form fields (content controls)
+        # - w:cryptProviderType="rsaFull" and w:cryptAlgorithmClass="hash" - Encryption settings
+        # - w:cryptAlgorithmType="typeAny" - Algorithm type
+        # - w:cryptAlgorithmSid="4" - Algorithm SID
+        # - w:cryptSpinCount="100000" - Spin count for encryption
+        # - w:hash="..." - Hash value (can be empty for forms protection)
+        
+        doc_protection.set(qn('w:enforcement'), '1')
+        doc_protection.set(qn('w:edit'), 'forms')  # "forms" allows editing only in content controls
+        doc_protection.set(qn('w:cryptProviderType'), 'rsaFull')
+        doc_protection.set(qn('w:cryptAlgorithmClass'), 'hash')
+        doc_protection.set(qn('w:cryptAlgorithmType'), 'typeAny')
+        doc_protection.set(qn('w:cryptAlgorithmSid'), '4')
+        doc_protection.set(qn('w:cryptSpinCount'), '100000')
+        
+        # For forms protection, we can use a simple hash or leave it empty
+        # Word will accept empty hash for forms protection
+        doc_protection.set(qn('w:hash'), '')
+        
+        logger.info("Applied document protection: restricted editing mode (editing allowed only in content controls)")
+        
+    except Exception as e:
+        logger.error(f"Failed to apply document protection: {str(e)}", exc_info=True)
+        # Don't fail the entire operation if protection fails
+        # Document will still work, just without protection
+
+
+def _replace_placeholders_in_paragraph(paragraph, placeholder_replacements: dict) -> int:
+    """
+    Replace all placeholders in a paragraph with their corresponding values.
+    
+    Args:
+        paragraph: The paragraph object to modify
+        placeholder_replacements: Dict mapping placeholder text to replacement info
+        
+    Returns:
+        Number of replacements made
+    """
+    replacements_made = 0
+    
+    # Get all placeholder texts that exist in this paragraph
+    found_placeholders = []
+    for placeholder_text in placeholder_replacements.keys():
+        if placeholder_text in paragraph.text:
+            found_placeholders.append(placeholder_text)
+    
+    if not found_placeholders:
+        return 0
+    
+    # Sort placeholders by length (longest first) to avoid partial replacements
+    found_placeholders.sort(key=len, reverse=True)
+    
+    # Replace each placeholder
+    editable_placeholders = []
+    locked_placeholders = []
+    
+    for placeholder_text in found_placeholders:
+        if placeholder_text in placeholder_replacements:
+            replacement_info = placeholder_replacements[placeholder_text]
+            value = replacement_info['value']
+            is_editable = replacement_info['editable']
+            placeholder_name = replacement_info['name']
+            
+            if is_editable:
+                # For editable fields, track for content control creation
+                logger.debug(f"Marking editable placeholder {placeholder_name} with: {value}")
+                editable_placeholders.append({
+                    'text': placeholder_text,
+                    'value': value,
+                    'name': placeholder_name
+                })
+            else:
+                # For locked fields, replace with plain text
+                logger.debug(f"Replacing locked placeholder {placeholder_name} with: {value}")
+                paragraph.text = paragraph.text.replace(placeholder_text, value)
+                locked_placeholders.append(placeholder_name)
+            
+            replacements_made += 1
+    
+    # Create editable content controls for editable placeholders
+    if editable_placeholders:
+        _create_editable_content_controls_in_paragraph(paragraph, editable_placeholders)
+    
+    return replacements_made
+
+
+def _create_editable_content_controls_in_paragraph(paragraph, editable_placeholders):
+    """
+    Create actual editable content controls in a paragraph using Word XML.
+    
+    Args:
+        paragraph: The paragraph object
+        editable_placeholders: List of dicts with 'text', 'value', and 'name' keys
+    """
+    try:
+        from docx.oxml import parse_xml
+        from docx.oxml.ns import qn
+        
+        # For each editable placeholder, create a content control
+        for placeholder_info in editable_placeholders:
+            placeholder_text = placeholder_info['text']
+            value = placeholder_info['value']
+            placeholder_name = placeholder_info['name']
+            
+            # Find and replace the placeholder with content control
+            if placeholder_text in paragraph.text:
+                # Create content control XML
+                sdt_xml = f'''
+                <w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                    <w:sdtPr>
+                        <w:alias w:val="{placeholder_name}"/>
+                        <w:tag w:val="{placeholder_name}"/>
+                        <w:id w:val="{abs(hash(placeholder_name)) % 1000000}"/>
+                    </w:sdtPr>
+                    <w:sdtContent>
+                        <w:r>
+                            <w:t xml:space="preserve">{value}</w:t>
+                        </w:r>
+                    </w:sdtContent>
+                </w:sdt>
+                '''
+                
+                # Parse the XML
+                sdt_element = parse_xml(sdt_xml)
+                
+                # Find the run containing the placeholder and replace it
+                for run in paragraph.runs:
+                    if placeholder_text in run.text:
+                        # Replace the placeholder text with empty string (remove it)
+                        run.text = run.text.replace(placeholder_text, '')
+                        # Insert the content control after the run (with the value inside)
+                        run._element.addnext(sdt_element)
+                        logger.debug(f"Created editable content control for {placeholder_name}: {value}")
+                        break
+                else:
+                    # If no run found, replace directly in paragraph text
+                    
+for run in paragraph.runs:
+    if placeholder_text in run.text:
+        run.text = run.text.replace(placeholder_text, value)
+                    logger.debug(f"Replaced editable placeholder {placeholder_name} with: {value}")
+                        
+    except Exception as e:
+        logger.error(f"Error creating editable content control: {e}")
+        # Fallback: just replace the text
+        for placeholder_info in editable_placeholders:
+            placeholder_text = placeholder_info['text']
+            value = placeholder_info['value']
+            
+for run in paragraph.runs:
+    if placeholder_text in run.text:
+        run.text = run.text.replace(placeholder_text, value)
+
+
+    
+    Args:
+        paragraph: The paragraph object
+        editable_placeholders: List of dicts with 'text', 'value', and 'name' keys
+    """
+    try:
+        from docx.oxml import parse_xml
+        from docx.oxml.ns import qn
+        
+        # For each editable placeholder, create a content control
+        for placeholder_info in editable_placeholders:
+            placeholder_text = placeholder_info['text']
+            value = placeholder_info['value']
+            placeholder_name = placeholder_info['name']
+            
+            # Find the run that contains the placeholder
+            for run in paragraph.runs:
+                if placeholder_text in run.text:
+                    # Create content control XML
+                    sdt_xml = f'''
+                    <w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                        <w:sdtPr>
+                            <w:alias w:val="{placeholder_name}"/>
+                            <w:tag w:val="{placeholder_name}"/>
+                            <w:id w:val="{hash(placeholder_name) % 1000000}"/>
+                        </w:sdtPr>
+                        <w:sdtContent>
+                            <w:r>
+                                <w:t>{value}</w:t>
+                            </w:r>
+                        </w:sdtContent>
+                    </w:sdt>
+                    '''
+                    
+                    # Replace the run text with content control
+                    run.text = run.text.replace(placeholder_text, value)
+                    # Note: Full content control implementation requires more complex XML manipulation
+                    # For now, we'll mark the text as editable and rely on document protection
+                    
+                    logger.debug(f"Created editable content control for {placeholder_name}")
+                    break
+                    
+    except Exception as e:
+        logger.error(f"Error creating editable content control: {e}")
+        # Fallback: just replace the text
+        for placeholder_info in editable_placeholders:
+            placeholder_text = placeholder_info['text']
+            value = placeholder_info['value']
+            
+for run in paragraph.runs:
+    if placeholder_text in run.text:
+        run.text = run.text.replace(placeholder_text, value)
+
+
+def _replace_with_editable_content_control(
+    doc: Document,
+    placeholder_text: str,
+    value: str,
+    tag_name: str
+) -> None:
+    """
+    Replace placeholder text with an editable content control (w:sdt element).
+    
+    The content control will be editable - used for fields marked as editable.
+    Document will be in restricted editing mode, allowing editing only in content controls.
+    
+    Args:
+        doc: Document object
+        placeholder_text: The placeholder text to replace (e.g., "{{SITE_NAME}}")
+        value: The value to insert into the content control
+        tag_name: The tag name for the content control (usually the placeholder name)
+    """
+    try:
+        # Replace in paragraphs
+        for paragraph in doc.paragraphs:
+            if placeholder_text in paragraph.text:
+                _replace_placeholder_in_paragraph_with_editable_content_control(
+                    paragraph, placeholder_text, value, tag_name
+                )
+        
+        # Replace in tables
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        if placeholder_text in paragraph.text:
+                            _replace_placeholder_in_paragraph_with_editable_content_control(
+                                paragraph, placeholder_text, value, tag_name
+                            )
+        
+        logger.debug(f"Replaced {placeholder_text} with editable content control (tag: {tag_name})")
+    except Exception as e:
+        logger.error(f"Failed to create editable content control for {placeholder_text}: {str(e)}", exc_info=True)
+        # Fallback to plain text replacement
+        for paragraph in doc.paragraphs:
+            if placeholder_text in paragraph.text:
+                
+for run in paragraph.runs:
+    if placeholder_text in run.text:
+        run.text = run.text.replace(placeholder_text, value)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        if placeholder_text in paragraph.text:
+                            
+for run in paragraph.runs:
+    if placeholder_text in run.text:
+        run.text = run.text.replace(placeholder_text, value)
+
+
+def _replace_placeholder_in_paragraph_with_editable_content_control(
+    paragraph,
+    placeholder_text: str,
+    value: str,
+    tag_name: str
+) -> None:
+    """
+    Replace placeholder text in a paragraph with an editable content control.
+    
+    Uses XML manipulation to create a w:sdt (structured document tag) element
+    WITHOUT locking attributes - this makes it editable in restricted editing mode.
+    """
+    try:
+        if placeholder_text not in paragraph.text:
+            return
+        
+        # Get paragraph XML element
+        p_elem = paragraph._element
+        
+        # Find all text nodes in the paragraph that contain the placeholder
+        # We need to find the exact run(s) containing the placeholder
+        found_placeholder = False
+        
+        # Iterate through all runs to find the one with placeholder
+        for run in paragraph.runs:
+            if placeholder_text in run.text:
+                found_placeholder = True
+                r_elem = run._element
+                parent = r_elem.getparent()
+                
+                # Create content control (w:sdt element) - NO LOCKING
+                sdt = OxmlElement('w:sdt')
+                
+                # Create sdtPr (properties) element
+                sdt_pr = OxmlElement('w:sdtPr')
+                
+                # Set tag name (required for content control identification)
+                tag = OxmlElement('w:tag')
+                tag.set(qn('w:val'), tag_name)
+                sdt_pr.append(tag)
+                
+                # Set content control type to "rich text" - this makes it explicitly editable
+                # In forms protection mode, rich text content controls are editable
+                rich_text = OxmlElement('w:richText')
+                sdt_pr.append(rich_text)
+                
+                # NO LOCKING ATTRIBUTES - content control is editable
+                # In forms protection mode, content controls without locks are editable
+                
+                # Create sdtContent element (contains the actual content)
+                sdt_content = OxmlElement('w:sdtContent')
+                
+                # Create a new run with the value
+                new_run = OxmlElement('w:r')
+                
+                # Preserve formatting from original run if possible
+                # Copy run properties (rPr) if they exist
+                r_pr = r_elem.find(qn('w:rPr'))
+                if r_pr is not None:
+                    new_r_pr = OxmlElement('w:rPr')
+                    for child in r_pr:
+                        new_r_pr.append(child)
+                    new_run.append(new_r_pr)
+                
+                # Create text element with the value
+                text_elem = OxmlElement('w:t')
+                # Preserve spaces
+                text_elem.set(qn('xml:space'), 'preserve')
+                text_elem.text = value
+                new_run.append(text_elem)
+                
+                sdt_content.append(new_run)
+                
+                # Assemble the content control
+                sdt.append(sdt_pr)
+                sdt.append(sdt_content)
+                
+                # Replace the run with the content control
+                # Find index of run in parent
+                run_index = list(parent).index(r_elem)
+                parent.insert(run_index, sdt)
+                parent.remove(r_elem)
+                
+                logger.info(f"Created editable content control for {tag_name} with value: {value}")
+                break
+        
+        if not found_placeholder:
+            # Fallback: if placeholder spans multiple runs, do simple replacement
+            logger.warning(f"Placeholder {placeholder_text} not found in single run, using simple text replacement (will not be editable)")
+            
+for run in paragraph.runs:
+    if placeholder_text in run.text:
+        run.text = run.text.replace(placeholder_text, value)
+                    
+    except Exception as e:
+        logger.error(f"Error creating editable content control in paragraph: {str(e)}", exc_info=True)
+        # Fallback to simple text replacement
+        try:
+            
+for run in paragraph.runs:
+    if placeholder_text in run.text:
+        run.text = run.text.replace(placeholder_text, value)
+        except:
+            pass
+
+
+def enforce_locked_placeholders_in_docx(
+    original_docx_path: Path,
+    updated_docx_bytes: bytes,
+    placeholder_config: Optional[Dict[str, Dict[str, bool]]],
+    field_mappings: Optional[Dict[str, str]],
+    site_profile: Optional[SiteProfile],
+    agreement: Optional[Agreement],
+    template_id: Optional[str] = None,
+) -> bytes:
+    """
+    Enforce locked (non-editable) placeholders by comparing the original
+    populated Version 1 document with the updated version and restoring
+    locked values where they were modified.
+
+    This works at a paragraph / table-cell granularity:
+    - If a paragraph or cell in the original document contains a locked
+      placeholder value and the corresponding paragraph/cell text was
+      changed in the updated document, the original text is restored.
+    - Editable fields are never touched.
+    - Any failure in this logic will NOT block saving – the original
+      updated_docx_bytes are returned.
+
+    Args:
+        original_docx_path: Path to the original Version 1 DOCX file.
+        updated_docx_bytes: Bytes of the updated DOCX from ONLYOFFICE.
+        placeholder_config: Template placeholder configuration
+            {"PLACEHOLDER": {"editable": true/false}}.
+        field_mappings: Dynamic field mappings
+            {"PLACEHOLDER": "site_profile.site_name"}.
+        site_profile: SiteProfile instance.
+        agreement: Agreement instance.
+        template_id: Optional template ID for logging.
+
+    Returns:
+        Potentially modified DOCX bytes with locked fields restored.
+    """
+    try:
+        if not placeholder_config:
+            logger.debug(
+                "No placeholder_config provided for locked field enforcement; skipping."
+            )
+            return updated_docx_bytes
+
+        # Determine locked placeholders (editable == False)
+        locked_placeholders = [
+            name
+            for name, cfg in placeholder_config.items()
+            if not cfg.get("editable", True)
+        ]
+
+        if not locked_placeholders:
+            logger.debug(
+                "No locked placeholders (editable=false) configured; skipping enforcement."
+            )
+            return updated_docx_bytes
+
+        # Build canonical values for each locked placeholder
+        locked_values: Dict[str, str] = {}
+        for placeholder_name in locked_placeholders:
+            value = get_placeholder_value_from_mapping(
+                placeholder_name,
+                field_mappings,
+                site_profile=site_profile,
+                agreement=agreement,
+            )
+            if value:
+                locked_values[placeholder_name] = value
+            else:
+                logger.debug(
+                    "Locked placeholder '%s' has no resolved value; it will be ignored.",
+                    placeholder_name,
+                )
+
+        if not locked_values:
+            logger.info(
+                "Locked placeholders configured but none have resolvable values; "
+                "skipping enforcement. template_id=%s",
+                template_id,
+            )
+            return updated_docx_bytes
+
+        logger.info(
+            "Enforcing locked placeholders for template_id=%s. Locked fields: %s",
+            template_id,
+            ", ".join(
+                f"{name}='{val}'" for name, val in locked_values.items()
+            ),
+        )
+
+        # Load original and updated documents
+        if not original_docx_path.exists():
+            logger.warning(
+                "Original Version 1 DOCX not found at %s; skipping locked field enforcement.",
+                original_docx_path,
+            )
+            return updated_docx_bytes
+
+        original_doc = Document(original_docx_path)
+        updated_doc = Document(io.BytesIO(updated_docx_bytes))
+
+        def _enforce_in_paragraphs(
+            original_paragraphs,
+            updated_paragraphs,
+            scope: str,
+        ) -> Tuple[int, int]:
+            """Return (blocks_checked, blocks_reverted)."""
+            checked = 0
+            reverted = 0
+
+            for idx, (orig_p, new_p) in enumerate(
+                zip(original_paragraphs, updated_paragraphs)
+            ):
+                orig_text = orig_p.text or ""
+                new_text = new_p.text or ""
+
+                if not orig_text:
+                    continue
+
+                checked += 1
+
+                if orig_text == new_text:
+                    continue
+
+                # Check if this block contains any locked value in the original
+                for placeholder_name, locked_value in locked_values.items():
+                    if locked_value and locked_value in orig_text:
+                        if locked_value not in new_text or new_text != orig_text:
+                            logger.warning(
+                                "Locked field changed and will be restored. "
+                                "template_id=%s placeholder=%s scope=%s index=%s",
+                                template_id,
+                                placeholder_name,
+                                scope,
+                                idx,
+                            )
+                            new_p.text = orig_text
+                            reverted += 1
+                            break
+
+            return checked, reverted
+
+        total_checked = 0
+        total_reverted = 0
+
+        # Enforce in top-level paragraphs
+        c, r = _enforce_in_paragraphs(
+            original_doc.paragraphs, updated_doc.paragraphs, scope="paragraph"
+        )
+        total_checked += c
+        total_reverted += r
+
+        # Enforce inside tables (cell by cell)
+        for t_idx, (orig_table, new_table) in enumerate(
+            zip(original_doc.tables, updated_doc.tables)
+        ):
+            for r_idx, (orig_row, new_row) in enumerate(
+                zip(orig_table.rows, new_table.rows)
+            ):
+                for c_idx, (orig_cell, new_cell) in enumerate(
+                    zip(orig_row.cells, new_row.cells)
+                ):
+                    scope = f"table[{t_idx}].row[{r_idx}].cell[{c_idx}]"
+                    c, r = _enforce_in_paragraphs(
+                        orig_cell.paragraphs,
+                        new_cell.paragraphs,
+                        scope=scope,
+                    )
+                    total_checked += c
+                    total_reverted += r
+
+        logger.info(
+            "Locked placeholder enforcement complete. template_id=%s blocks_checked=%s blocks_reverted=%s",
+            template_id,
+            total_checked,
+            total_reverted,
+        )
+
+        # Save updated document back to bytes
+        output_buffer = io.BytesIO()
+        updated_doc.save(output_buffer)
+        return output_buffer.getvalue()
+
+    except Exception as e:
+        logger.error(
+            "Error enforcing locked placeholders (template_id=%s): %s. "
+            "Proceeding without reverting locked fields.",
+            template_id,
+            str(e),
+            exc_info=True,
+        )
+        # In case of any error, do NOT block save – return original bytes
+        return updated_docx_bytes
+
+
+def _replace_signature_blocks_in_docx(
+    doc: Document,
+    profile: SiteProfile,
+    sponsor_signatory_name: Optional[str] = None,
+    sponsor_signatory_email: Optional[str] = None,
+    current_user_email: Optional[str] = None
+):
+    """
+    Replace signature block placeholders in DOCX document.
+    
+    Args:
+        doc: python-docx Document object
+        profile: SiteProfile instance
+        sponsor_signatory_name: Optional sponsor signatory name
+        sponsor_signatory_email: Optional sponsor signatory email
+        current_user_email: Optional current user email for fallback
+    """
+    # Find and replace SITE_SIGNATURE_BLOCK
+    site_sig_text = _generate_site_signature_block_text(profile)
+    
+    # Find and replace SPONSOR_SIGNATURE_BLOCK
+    sponsor_sig_text = _generate_sponsor_signature_block_text(
+        profile,
+        sponsor_signatory_name,
+        sponsor_signatory_email,
+        current_user_email
+    )
+    
+    # Replace in paragraphs
+    for paragraph in doc.paragraphs:
+        if "{{SITE_SIGNATURE_BLOCK}}" in paragraph.text:
+            
+for run in paragraph.runs:
+    if "{{SITE_SIGNATURE_BLOCK}}" in run.text:
+        run.text = run.text.replace("{{SITE_SIGNATURE_BLOCK}}", site_sig_text)
+        if "{{SPONSOR_SIGNATURE_BLOCK}}" in paragraph.text:
+            
+for run in paragraph.runs:
+    if "{{SPONSOR_SIGNATURE_BLOCK}}" in run.text:
+        run.text = run.text.replace("{{SPONSOR_SIGNATURE_BLOCK}}", sponsor_sig_text)
+    
+    # Replace in tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    if "{{SITE_SIGNATURE_BLOCK}}" in paragraph.text:
+                        
+for run in paragraph.runs:
+    if "{{SITE_SIGNATURE_BLOCK}}" in run.text:
+        run.text = run.text.replace("{{SITE_SIGNATURE_BLOCK}}", site_sig_text)
+                    if "{{SPONSOR_SIGNATURE_BLOCK}}" in paragraph.text:
+                        
+for run in paragraph.runs:
+    if "{{SPONSOR_SIGNATURE_BLOCK}}" in run.text:
+        run.text = run.text.replace("{{SPONSOR_SIGNATURE_BLOCK}}", sponsor_sig_text)
+
+
+def _generate_site_signature_block_text(profile: SiteProfile) -> str:
+    """Generate site signature block text."""
+    hospital_name = profile.hospital_name or ""
+    signatory_name = profile.authorized_signatory_name or ""
+    signatory_title = profile.authorized_signatory_title or ""
+    
+    return f"""Signed for and on behalf of:
+{hospital_name}
+
+Name: {signatory_name}
+Title: {signatory_title}
+
+Signature: _______________________
+
+Date: ____________________________"""
+
+
+def _generate_sponsor_signature_block_text(
+    profile: SiteProfile,
+    sponsor_signatory_name: Optional[str] = None,
+    sponsor_signatory_email: Optional[str] = None,
+    current_user_email: Optional[str] = None
+) -> str:
+    """Generate sponsor signature block text."""
+    contracting_entity = profile.primary_contracting_entity or ""
+    
+    # Get sponsor signatory name
+    signatory_name = sponsor_signatory_name
+    if not signatory_name:
+        if current_user_email:
+            signatory_name = current_user_email.split("@")[0]
+        else:
+            signatory_name = ""
+    
+    return f"""Signed for and on behalf of:
+{contracting_entity}
+
+Name: {signatory_name}
+
+Signature: _______________________
+
+Date: ____________________________"""

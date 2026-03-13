@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dizzaroo Brand Global Styles */
+@layer base {
+  :root {
+    /* Brand Colors as CSS Variables */
+    --dizzaroo-deep-blue: #1E73BE;
+    --dizzaroo-deep-blue-light: #4A9FE8;
+    --dizzaroo-deep-blue-dark: #155A94;
+    --dizzaroo-soft-green: #76C893;
+    --dizzaroo-soft-green-light: #A4D9B5;
+    --dizzaroo-soft-green-dark: #5BA374;
+    --dizzaroo-blue-green: #168AAD;
+    --dizzaroo-blue-green-light: #4BA8C5;
+    --dizzaroo-blue-green-dark: #116B87;
+    
+    /* DNA Gradient */
+    --dizzaroo-gradient: linear-gradient(135deg, #168AAD, #76C893);
+  }
+  
+  * {
+    font-family: 'Urbanist', sans-serif;
+  }
+  
+  body {
+    font-family: 'Urbanist', sans-serif;
+    @apply antialiased;
+    font-feature-settings: "kern" 1;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  
+  /* Typography with Urbanist adjustments */
+  /* Note: Use text-title, text-heading, text-subheading, text-body, text-medium-body utilities directly in components */
+  /* These are defined in tailwind.config.js and can be used as classes */
+}
+
+@layer components {
+  /* Brand-specific utility classes */
+  .dizzaroo-gradient {
+    background: linear-gradient(135deg, #168AAD, #76C893);
+  }
+  
+  .dizzaroo-gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #168AAD, #76C893);
+  }
+  
+  .dizzaroo-shadow {
+    box-shadow: 0 4px 14px 0 rgba(30, 115, 190, 0.15);
+  }
+  
+  .dizzaroo-shadow-lg {
+    box-shadow: 0 10px 25px -5px rgba(30, 115, 190, 0.2);
+  }
+}
+
+/* Ensure scrolling works properly */
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Smooth scrolling */
+.overflow-y-auto {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+@layer base {
+  body {
+    @apply bg-gray-100 text-gray-900;
+  }
+}
+
+/* Onboarding animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.animate-slideUp {
+  animation: slideUp 0.4s ease-out;
+}

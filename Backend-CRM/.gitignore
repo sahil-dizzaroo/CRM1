@@ -1,0 +1,55 @@
+# --- Python ---
+*.__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+.env
+.env.*
+.venv/
+venv/
+env/
+ENV/
+
+# --- Packages ---
+*.egg
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# --- Logs ---
+*.log
+logs/
+*.out
+
+# --- Testing ---
+.coverage
+.coverage.*
+htmlcov/
+pytest_cache/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+
+# --- Misc ---
+*.sqlite3
+__snapshots__/
+
+# Environment / local-only files
+docker-compose.prod.yml
+setup_local_db.bat
+docker-compose.yml
+.cursor/debug.log
+
+./app/uploads/
+./app/__pycache__
+./uploads
